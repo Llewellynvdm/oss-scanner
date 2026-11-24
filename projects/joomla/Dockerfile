@@ -9,19 +9,27 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY --from=composer /usr/bin/composer /usr/local/bin/composer
 
-# Install the extensions needed by the CMS and its locked development packages.
-# The local database lets the installer run without a second container.
+# MariaDB supplies the server, client and rsync for the offline installation.
+# Keep the libraries used by the PHP extensions and discard their build headers.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl git python3 rsync unzip \
-        mariadb-client mariadb-server \
-        libfreetype6-dev libgmp-dev libicu-dev libjpeg-dev libldap2-dev \
+        git mariadb-server unzip; \
+    savedAptMark="$(apt-mark showmanual)"; \
+    apt-get install -y --no-install-recommends \
+        libfreetype-dev libicu-dev libjpeg-dev libldap-dev \
         libpng-dev libwebp-dev libzip-dev; \
-    rm -rf /var/lib/apt/lists/*; \
     docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp; \
     docker-php-ext-configure ldap --with-libdir="lib/$(dpkg-architecture -qDEB_BUILD_MULTIARCH)"; \
-    docker-php-ext-install -j2 bcmath exif gd gmp intl ldap mysqli pdo_mysql zip; \
+    docker-php-ext-install -j2 exif gd intl ldap mysqli pdo_mysql zip; \
+    apt-mark auto '.*' > /dev/null; \
+    apt-mark manual $savedAptMark > /dev/null; \
+    ldd "$(php-config --extension-dir)"/*.so \
+        | awk '/=> \/(usr\/)?lib\// { so = $(NF-1); sub("^/(usr/)?", "", so); print "*" so }' \
+        | sort -u | xargs -r dpkg-query --search \
+        | awk 'sub(":$", "", $1) { print $1 }' | sort -u | xargs -r apt-mark manual; \
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+    apt-get dist-clean; \
     ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
     ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
