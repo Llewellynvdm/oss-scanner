@@ -25,7 +25,8 @@ extensions and live Joomla installations are outside this enrollment.
 The source checkout and the built media assets are in `/src`. Run
 `./libraries/vendor/bin/phpunit --testsuite Unit` there for the CMS unit suite.
 `joomla-smoke` installs a disposable copy with MariaDB, checks the CMS console
-and the site homepage, then removes the installation. Both checks run offline.
+and verifies that Apache serves the checkout's `LICENSE.txt`, then removes the
+installation. Both checks run offline.
 
 ## Assessment and reporting
 
