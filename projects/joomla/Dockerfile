@@ -95,11 +95,12 @@ runuser -u www-data -- php installation/joomla.php install --no-interaction \
     --db-type=mysqli --db-host=localhost --db-user=joomla --db-pass="$db_password" --db-name=joomla
 runuser -u www-data -- php cli/joomla.php cache:clean --help > /dev/null
 
-# The site name distinguishes an installed frontend from an installer or error page.
-apache2-foreground &
+# Apache prefork signals its process group on shutdown. Give it a group of its own.
+setsid apache2-foreground &
 http_pid=$!
 curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 15 \
     http://127.0.0.1/ -o "$work/home.html"
+# The site name distinguishes an installed frontend from an installer or error page.
 grep -Fq 'Joomla smoke test' "$work/home.html"
 BASH
 
