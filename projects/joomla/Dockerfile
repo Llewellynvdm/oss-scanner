@@ -93,8 +93,7 @@ runuser -u www-data -- php installation/joomla.php install --no-interaction \
     --site-name='Joomla smoke test' --admin-user='Local Administrator' --admin-username=localadmin \
     --admin-password="$(php -r 'echo "Aa1!", bin2hex(random_bytes(20));')" --admin-email=admin@example.org \
     --db-type=mysqli --db-host=localhost --db-user=joomla --db-pass="$db_password" --db-name=joomla
-runuser -u www-data -- php cli/joomla.php list --raw > "$work/commands"
-grep -q '^cache:clean ' "$work/commands"
+runuser -u www-data -- php cli/joomla.php cache:clean --help > /dev/null
 
 # The site name distinguishes an installed frontend from an installer or error page.
 apache2-foreground &
