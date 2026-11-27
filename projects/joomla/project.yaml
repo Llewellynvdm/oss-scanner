@@ -1,12 +1,13 @@
-# Follow the CMS patch branch. Review this pin when a new minor becomes stable.
-repo: https://github.com/joomla/joomla-cms#6.2-dev
+# Joomla's default branch is the patch branch of the current stable minor (6.2-dev when this was written) and moves
+# to the next minor's patch branch when that minor is released, so following it needs no change here. Add #<branch>
+# to hold one.
+repo: https://github.com/joomla/joomla-cms
 homepage: https://www.joomla.org/
 
-# Keep the draft paused until the maintainer completes the offline build check.
-disabled: true
-
-# The JSST receives private reports for Joomla core through its team mailbox.
+# The Joomla! Security Strike Team (JSST) receives reports for Joomla core through its team mailbox, encrypted to the
+# team key below. GitHub security advisories stay off: the JSST coordinates by email.
 primary_contact: security@joomla.org
+disabled: false
 output_format:
   email:
     min_severity: low
@@ -14,7 +15,7 @@ output_format:
     min_severity: none
 
 # JSST team key from https://developer.joomla.org/security/gpg-keys.html
-# Fingerprint 50F1 61F2 74CB 548B 942B FF4D 01D4 069F CA44 D4B9
+# Fingerprint 50F1 61F2 74CB 548B 942B FF4D 01D4 069F CA44 D4B9, valid until 2028-06-12
 pgp: |
   -----BEGIN PGP PUBLIC KEY BLOCK-----
 
