@@ -4,7 +4,7 @@
 # /src    the joomla-cms git checkout (the repository named in project.yaml), with its locked Composer and npm
 #         dependencies installed, its media assets built from media_source/ into media/, and a working site
 #         installed into it by the CMS's own console installer. Apache serves /src through mod_php with AllowOverride
-#         All, so a renamed htaccess.txt applies as it does in production. The database is MariaDB on a unix socket.
+#         All, so Joomla's .htaccess files apply as they do in production. The database is MariaDB on a unix socket.
 #
 # Start the services with `joomla-start`. The site is then at http://127.0.0.1/, the administrator at
 # http://127.0.0.1/administrator/ and the web services API at http://127.0.0.1/api/index.php/v1/. `joomla-stop` stops
@@ -60,20 +60,33 @@ RUN { echo 'display_errors=Off'; \
       echo 'pdo_mysql.default_socket=/run/mysqld/mysqld.sock'; \
     } > "$PHP_INI_DIR/conf.d/oss-scanner.ini"
 
-# Apache serves /src on the loopback interface only, with .htaccess enabled. The checkout's .git and the directories
-# a Joomla release does not ship (the scanner's Dockerfile, build tooling, asset sources, tests, node_modules) stay
-# private. The base image links Apache's logs to the console, which a daemonised Apache does not have; make them real
-# files, so PHP and Apache errors end up in /var/log/apache2/error.log.
+# Apache serves /src on the loopback interface only, with .htaccess enabled, so Joomla's own libraries/.htaccess keeps
+# libraries/ private as on a release. At the top level of the checkout it serves only what a Joomla release ships
+# (build/build.php) and the files a site owner adds; the rest of a development checkout stays private: .git, build
+# tooling and its configuration (phpunit.xml holds the database login), asset sources, tests, node_modules, and
+# installation/, which a production site has removed and which on a development build would let anyone repeat the
+# installation. The base image links Apache's logs to the console, which a daemonised Apache does not have; make them
+# real files, so PHP and Apache errors end up in /var/log/apache2/error.log.
+COPY <<'CONF' /etc/apache2/conf-available/joomla.conf
+ServerName 127.0.0.1
+<Directory /src>
+    Options -Indexes +FollowSymLinks
+    AllowOverride All
+    Require all granted
+    <If "%{REQUEST_FILENAME} =~ m#^/src/[^/]+$# && -f %{REQUEST_FILENAME} && %{REQUEST_FILENAME} !~ m#^/src/(index\.php|configuration\.php|htaccess\.txt|\.htaccess|web\.config\.txt|robots\.txt|robots\.txt\.dist|LICENSE\.txt|README\.txt)$#">
+        Require all denied
+    </If>
+</Directory>
+<DirectoryMatch "^/src/(?!(administrator|api|cache|cli|components|files|images|includes|language|layouts|libraries|media|modules|plugins|templates|tmp)/)[^/]+/">
+    Require all denied
+</DirectoryMatch>
+CONF
 RUN set -eux; \
     a2enmod rewrite headers expires; \
     sed -i 's@/var/www/html@/src@' /etc/apache2/sites-available/000-default.conf; \
     sed -i 's/^Listen 80$/Listen 127.0.0.1:80/' /etc/apache2/ports.conf; \
-    printf '%s\n' 'ServerName 127.0.0.1' \
-        '<Directory /src>' '    Options -Indexes +FollowSymLinks' '    AllowOverride All' '    Require all granted' '</Directory>' \
-        '<DirectoryMatch "^/src/(\.git|\.oss-scanner|build|media_source|node_modules|tests)(/|$)">' \
-        '    Require all denied' '</DirectoryMatch>' \
-        > /etc/apache2/conf-available/joomla.conf; \
     a2enconf joomla; \
+    apache2ctl configtest; \
     rm -f /var/log/apache2/*.log
 
 # There is no mail server. This sendmail writes each email Joomla sends (password resets, registration, multi-factor
@@ -93,19 +106,24 @@ RUN mkdir -p /var/mail/joomla && chown www-data:www-data /var/mail/joomla \
 COPY --chmod=0755 <<'SH' /usr/local/bin/joomla-start
 #!/bin/sh
 set -e
-# Files root creates in these directories (for example by running cli/joomla.php as root) would stop the site, which
-# runs as www-data, from writing there. Hand them back first.
-chown -R www-data:www-data /src/administrator/cache /src/administrator/logs /src/cache /src/tmp /src/images /var/mail/joomla
+# Files root creates in these places (for example by running cli/joomla.php as root, or editing configuration.php)
+# would stop the site, which runs as www-data, from writing there. Hand them back first.
+chown -R www-data:www-data /src/administrator/cache /src/administrator/logs /src/cache /src/tmp /src/images /src/files \
+    /var/mail/joomla
+[ ! -e /src/configuration.php ] || chown www-data:www-data /src/configuration.php
 mkdir -p /run/mysqld /var/log/mysql
 chown mysql:mysql /run/mysqld
 chown mysql:adm /var/log/mysql
-if ! mariadb-admin ping --silent 2>/dev/null; then
+# A pid file can outlive its process when the container is restarted, and the pid then belongs to another process.
+stale() { pid=$(cat "$1" 2>/dev/null) || return 1; [ "$(cat "/proc/$pid/comm" 2>/dev/null)" != "$2" ]; }
+if ! mariadb-admin ping --silent > /dev/null 2>&1; then
+    if stale /run/mysqld/mysqld.pid mariadbd; then rm -f /run/mysqld/mysqld.pid; fi
     # The container has no syslog: the server logs to /var/log/mysql/error.log, its wrapper to start.log.
     "$(command -v mariadbd-safe || command -v mysqld_safe)" --skip-syslog --log-error=/var/log/mysql/error.log \
         >> /var/log/mysql/start.log 2>&1 &
     server=$!
     waited=0
-    until mariadb-admin ping --silent 2>/dev/null; do
+    until mariadb-admin ping --silent > /dev/null 2>&1; do
         if ! kill -0 "$server" 2>/dev/null; then
             problem="MariaDB exited before it was ready"
         elif [ "$waited" -ge 120 ]; then
@@ -120,16 +138,37 @@ if ! mariadb-admin ping --silent 2>/dev/null; then
         exit 1
     done
 fi
-if ! { [ -s /var/run/apache2/apache2.pid ] && kill -0 "$(cat /var/run/apache2/apache2.pid)" 2>/dev/null; }; then
+# Apache is running when it answers.
+answers() { curl -s -o /dev/null --max-time 2 http://127.0.0.1/; }
+if ! answers; then
+    if stale /var/run/apache2/apache2.pid apache2; then rm -f /var/run/apache2/apache2.pid; fi
     apachectl start
+    waited=0
+    until answers; do
+        if [ "$waited" -ge 60 ]; then
+            echo "Apache did not answer within 30 seconds. The end of /var/log/apache2/error.log:" >&2
+            tail -n 20 /var/log/apache2/error.log >&2 || true
+            exit 1
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
 fi
 SH
 COPY --chmod=0755 <<'SH' /usr/local/bin/joomla-stop
 #!/bin/sh
-apachectl stop 2>/dev/null
-pid=$(cat /run/mysqld/mysqld.pid 2>/dev/null || true)
-mariadb-admin shutdown 2>/dev/null
-while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+# Stop Apache and MariaDB, waiting at most a minute for each. Only a pid that is Apache's is signalled: a pid file can
+# outlive its process when the container is restarted.
+pid=$(cat /var/run/apache2/apache2.pid 2>/dev/null || true)
+if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = apache2 ]; then
+    apachectl stop
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 120 ]; do
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+fi
+mariadb-admin --shutdown-timeout=60 shutdown 2>/dev/null
 true
 SH
 COPY --chmod=0755 <<'SH' /usr/local/bin/as-www-data
@@ -269,10 +308,10 @@ RUN as-www-data composer install --prefer-dist --no-interaction --no-progress \
 # suite, whose phpunit.xml points at it.
 #
 # A stock site lets Super Users alone log in to the API, hold an API token and use the web services (`core.api`).
-# Here every account can use the API with its group's rights, and web service access mirrors the administrator:
-# Administrator gets `core.api` on everything, as `core.manage` gives it everything there; Manager on the components
-# Managers manage (banners, contacts, content, media, newsfeeds); the Registered tree on content and media, where its
-# site content rights apply. The users web service stays with Administrator and Super Users, as the Users manager does.
+# Here the two other groups that log in to the administrator can use the API too, for what the administrator lets them
+# manage, because the API checks `core.api` where the administrator checks `core.manage`: Administrator gets `core.api`
+# everywhere but the installer, which the administrator denies it; Manager on banners, contacts, content, media and
+# newsfeeds. Author, Editor, Publisher and Registered keep the stock setting: no API.
 RUN --network=none <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -288,14 +327,13 @@ as-www-data php installation/joomla.php install --no-interaction \
     --site-name='Joomla OSS Scanner' --admin-user='Super User' --admin-username=superuser \
     --admin-password=superuser-password --admin-email=superuser@example.org \
     --db-type=mysqli --db-host=localhost --db-user=joomla --db-pass=joomla --db-name=joomla --db-prefix=jos_
-joomla-permission root.1 core.login.api 2=1 6=1
+joomla-permission root.1 core.login.api 6=1
 joomla-permission root.1 core.api 7=1
+joomla-permission com_installer core.api 7=0
 for component in com_banners com_contact com_content com_media com_newsfeeds; do
     joomla-permission "$component" core.api 6=1
 done
-joomla-permission com_content core.api 2=1
-joomla-permission com_media core.api 2=1
-mariadb joomla -e "UPDATE jos_extensions SET params = '{\"allowedUserGroups\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"]}'
+mariadb joomla -e "UPDATE jos_extensions SET params = '{\"allowedUserGroups\":[\"6\",\"7\",\"8\"]}'
     WHERE type = 'plugin' AND folder = 'user' AND element = 'token'"
 for spec in administrator:Administrator manager:Manager publisher:Publisher editor:Editor author:Author registered:Registered; do
     IFS=: read -r login group <<< "$spec"
@@ -341,26 +379,31 @@ curl -fsSL http://127.0.0.1/administrator/index.php | grep 'name="username"' > /
 [[ "$(status http://127.0.0.1/api/index.php/v1/content/articles)" =~ ^40[13]$ ]]          # the API refuses anonymous requests
 api() { curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(joomla-api-token "$1")" "http://127.0.0.1/api/index.php/v1/$2"; }
 curl -fsS -H "Authorization: Bearer $(joomla-api-token superuser)" http://127.0.0.1/api/index.php/v1/users | grep '"superuser"' > /dev/null
-test "$(api administrator users)" = 200          # Administrators manage users, through the API too
-test "$(api manager users)" = 403                 # Managers do not, as in the administrator
-test "$(api registered users)" = 403
-test "$(api author content/articles)" = 200       # the site content groups reach content
-test "$(api registered content/articles)" = 200
+test "$(api administrator users)" = 200           # Administrators manage users, through the API too,
+test "$(api administrator extensions)" = 403      # but not extensions, as in the administrator
+test "$(api manager content/articles)" = 200      # Managers manage content,
+test "$(api manager users)" = 403                 # not users
+test "$(api author content/articles)" = 401       # the site content groups have no API, as on a stock site
+test "$(status http://127.0.0.1/installation/index.php)" = 403
+test "$(status http://127.0.0.1/libraries/vendor/composer/installed.json)" = 403
+test "$(status http://127.0.0.1/phpunit.xml)" = 403
+test "$(status http://127.0.0.1/build/build.mjs)" = 403
 test "$(status http://127.0.0.1/.git/HEAD)" = 403
 test "$(status http://127.0.0.1/configuration.php)" = 200                                 # configuration.php is executed,
 test -z "$(curl -s http://127.0.0.1/configuration.php)"                                    # not served
 curl -fsS http://127.0.0.1/LICENSE.txt | cmp - /src/LICENSE.txt
 joomla-console cache:clean
 suite() {
-    # Run a PHPUnit suite, keep its log, and state its exit code; never fail the build on it.
+    # Run a PHPUnit suite, keep its log and state its exit code. Failing tests do not fail the build; a PHPUnit that
+    # cannot run at all (126, 127) does, since the image would lack what threat_model.md promises.
     local code=0
     joomla-phpunit --testsuite "$1" 2>&1 | tee "/var/log/phpunit-$1.log" || code=${PIPESTATUS[0]}
     echo "$1 $code" >> /var/log/phpunit-results.txt
-    if [ "$code" = 0 ]; then
-        echo "PHPUnit $1 suite: passed (exit code 0)"
-    else
-        echo "WARNING: PHPUnit $1 suite: exit code $code; its log is /var/log/phpunit-$1.log"
-    fi
+    case $code in
+        0) echo "PHPUnit $1 suite: passed (exit code 0)" ;;
+        126|127) echo "PHPUnit could not run (exit code $code): see /var/log/phpunit-$1.log" >&2; exit 1 ;;
+        *) echo "WARNING: PHPUnit $1 suite: exit code $code; its log is /var/log/phpunit-$1.log" ;;
+    esac
 }
 : > /var/log/phpunit-results.txt
 suite Unit
