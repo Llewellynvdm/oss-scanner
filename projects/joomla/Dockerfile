@@ -96,10 +96,27 @@ set -e
 # Files root creates in these directories (for example by running cli/joomla.php as root) would stop the site, which
 # runs as www-data, from writing there. Hand them back first.
 chown -R www-data:www-data /src/administrator/cache /src/administrator/logs /src/cache /src/tmp /src/images /var/mail/joomla
-mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld
+mkdir -p /run/mysqld
+chown mysql:mysql /run/mysqld
 if ! mariadb-admin ping --silent 2>/dev/null; then
-    "$(command -v mariadbd-safe || command -v mysqld_safe)" >/dev/null 2>&1 &
-    until mariadb-admin ping --silent 2>/dev/null; do sleep 0.5; done
+    # The server's errors go to /var/log/mysql/error.log (not syslog, which the container does not have).
+    "$(command -v mariadbd-safe || command -v mysqld_safe)" --skip-syslog --log-error=/var/log/mysql/error.log \
+        >> /var/log/mysql/start.log 2>&1 &
+    server=$!
+    for _ in $(seq 1 60); do
+        mariadb-admin ping --silent 2>/dev/null && break
+        if ! kill -0 "$server" 2>/dev/null; then
+            echo "MariaDB exited before it was ready. /var/log/mysql/error.log ends with:" >&2
+            tail -n 20 /var/log/mysql/error.log >&2
+            exit 1
+        fi
+        sleep 0.5
+    done
+    if ! mariadb-admin ping --silent 2>/dev/null; then
+        echo "MariaDB was not ready after 30 seconds. /var/log/mysql/error.log ends with:" >&2
+        tail -n 20 /var/log/mysql/error.log >&2
+        exit 1
+    fi
 fi
 if ! { [ -s /var/run/apache2/apache2.pid ] && kill -0 "$(cat /var/run/apache2/apache2.pid)" 2>/dev/null; }; then
     apachectl start
@@ -297,7 +314,8 @@ EOF
 # Check, offline, that the site, the administrator, the API and the console work, and that Apache keeps the
 # checkout's .git private and runs configuration.php instead of serving it. A failing check fails the build: the
 # scanner would get an image it cannot use. A failing test does not: the branch is upmerged daily, and one red test
-# must not stop the scan.
+# must not stop the scan. Each suite's exit code is printed and kept in /var/log/phpunit-results.txt, with its output
+# in /var/log/phpunit-<suite>.log.
 RUN --network=none <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -314,11 +332,24 @@ test "$(api registered users)" = 403
 test "$(api author content/articles)" = 200       # the site content groups reach content
 test "$(api registered content/articles)" = 200
 test "$(status http://127.0.0.1/.git/HEAD)" = 403
-test "$(status http://127.0.0.1/configuration.php)" = 200 && test -z "$(curl -s http://127.0.0.1/configuration.php)"
+test "$(status http://127.0.0.1/configuration.php)" = 200                                 # configuration.php is executed,
+test -z "$(curl -s http://127.0.0.1/configuration.php)"                                    # not served
 curl -fsS http://127.0.0.1/LICENSE.txt | cmp - /src/LICENSE.txt
 joomla-console cache:clean
-joomla-phpunit --testsuite Unit || echo "WARNING: the Unit suite reported failures"
-joomla-phpunit --testsuite Integration || echo "WARNING: the Integration suite reported failures"
+suite() {
+    # Run a PHPUnit suite, keep its log, and state its exit code; never fail the build on it.
+    local code=0
+    joomla-phpunit --testsuite "$1" 2>&1 | tee "/var/log/phpunit-$1.log" || code=${PIPESTATUS[0]}
+    echo "$1 $code" >> /var/log/phpunit-results.txt
+    if [ "$code" = 0 ]; then
+        echo "PHPUnit $1 suite: passed (exit code 0)"
+    else
+        echo "WARNING: PHPUnit $1 suite: exit code $code; its log is /var/log/phpunit-$1.log"
+    fi
+}
+: > /var/log/phpunit-results.txt
+suite Unit
+suite Integration
 joomla-stop
 # Start the scan with an empty error log and mailbox: what is in them now came from the build.
 : > /var/log/apache2/error.log

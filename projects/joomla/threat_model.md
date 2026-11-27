@@ -142,10 +142,12 @@ Lower priority or out of scope:
   `as-www-data npm run build -- -n <resource>` (one resource).
 - Tests: `joomla-phpunit --testsuite Unit` runs the CMS unit suite, `joomla-phpunit --testsuite Integration` the
   integration suite against `joomla_test` (its LDAP tests are skipped: there is no LDAP server). Both run offline. The
-  Cypress System suite needs a browser and does not run here; reproduce through curl or PHP instead. The build runs
-  both PHPUnit suites and reports, but does not fail on, test failures.
-- Logs: PHP and Apache errors in `/var/log/apache2/error.log`, requests in `/var/log/apache2/access.log`, Joomla's
-  own logs in `/src/administrator/logs/`. Debug mode and error display are off, as on a production site.
+  Cypress System suite needs a browser and does not run here; reproduce through curl or PHP instead. The build ran
+  both PHPUnit suites without failing on them: `/var/log/phpunit-results.txt` holds each suite's exit code and
+  `/var/log/phpunit-Unit.log` and `/var/log/phpunit-Integration.log` their output.
+- Logs: PHP and Apache errors in `/var/log/apache2/error.log`, requests in `/var/log/apache2/access.log`, MariaDB's
+  in `/var/log/mysql/error.log`, Joomla's own in `/src/administrator/logs/`. Debug mode and error display are off, as
+  on a production site.
 - Stock settings worth knowing: user registration is off (Users › Options); `htaccess.txt` is not active (copy it to
   `/src/.htaccess` to test the recommended production configuration); the HTTP Headers plugin is enabled with its
   defaults; Smart Search indexing has not run.
