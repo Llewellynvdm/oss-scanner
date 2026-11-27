@@ -1,6 +1,9 @@
 # Proposed patches for Joomla CMS
 
-Prepare a focused diff against the tested CMS revision in `/src` for private JSST review. Explain the cause and why
+Prepare a focused diff against the tested CMS revision in `/src` for private JSST review. A fix to a Joomla
+Framework package under `libraries/vendor/joomla/<package>` belongs to that package's `joomla-framework`
+repository: `libraries/vendor/` is not part of the CMS repository, so give that diff against the package and the
+version `composer.lock` names. Explain the cause and why
 the change corrects it. Preserve the stable branch's public interfaces and existing behavior for legitimate callers.
 Follow the patterns of the surrounding component or library and keep unrelated formatting out of the diff.
 
