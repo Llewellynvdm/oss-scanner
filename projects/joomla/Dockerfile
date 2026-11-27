@@ -62,7 +62,10 @@ RUN { echo 'display_errors=Off'; \
 
 # Apache serves /src on the loopback interface only, with .htaccess enabled, so Joomla's own libraries/.htaccess keeps
 # libraries/ private as on a release. At the top level of the checkout it serves only what a Joomla release ships
-# (build/build.php) and the files a site owner adds; the rest of a development checkout stays private: .git, build
+# (build/build.php): the release directories, and the files index.php, configuration.php (which runs; its source is
+# not served), htaccess.txt, web.config.txt, robots.txt.dist, robots.txt once a site owner creates it, LICENSE.txt and
+# README.txt. Every other top-level file or directory gets 403, including one created later, such as a sitemap.xml a
+# site owner adds or a file an exploit writes. This keeps the rest of a development checkout private: .git, build
 # tooling and its configuration (phpunit.xml holds the database login), asset sources, tests, node_modules, and
 # installation/, which a production site has removed and which on a development build would let anyone repeat the
 # installation. The base image links Apache's logs to the console, which a daemonised Apache does not have; make them
@@ -97,7 +100,7 @@ RUN mkdir -p /var/mail/joomla && chown www-data:www-data /var/mail/joomla \
 
 # Helpers (there is no init system in the container):
 #   joomla-start      starts MariaDB and Apache; safe to run again
-#   joomla-stop       stops both
+#   joomla-stop       stops both; exits 1, naming the service, if one is still running
 #   as-www-data       runs a command as www-data, the user Apache runs as and the owner of /src
 #   joomla-console    cli/joomla.php as www-data
 #   joomla-phpunit    PHPUnit as www-data, from /src, with the checkout's phpunit.xml
@@ -157,19 +160,36 @@ fi
 SH
 COPY --chmod=0755 <<'SH' /usr/local/bin/joomla-stop
 #!/bin/sh
-# Stop Apache and MariaDB, waiting at most a minute for each. Only a pid that is Apache's is signalled: a pid file can
-# outlive its process when the container is restarted.
+# Stop Apache and MariaDB, waiting at most a minute for each. Exits 0 when both are stopped, including when neither was
+# running. A service still running at the end is named, with what its shutdown said and the end of its log, and the
+# exit code is 1; the other service is stopped regardless. Only a pid that is Apache's is signalled: a pid file can
+# outlive its process when the container is restarted, and the pid may then belong to an unrelated process.
+status=0
+apache() { [ "$(cat "/proc/$1/comm" 2>/dev/null)" = apache2 ] && ! grep -qs '^State:[[:space:]]*Z' "/proc/$1/status"; }
 pid=$(cat /var/run/apache2/apache2.pid 2>/dev/null || true)
-if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = apache2 ]; then
+if [ -n "$pid" ] && apache "$pid"; then
     apachectl stop
     waited=0
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 120 ]; do
+    while apache "$pid" && [ "$waited" -lt 120 ]; do
         sleep 0.5
         waited=$((waited + 1))
     done
 fi
-mariadb-admin --shutdown-timeout=60 shutdown 2>/dev/null
-true
+if { [ -n "$pid" ] && apache "$pid"; } || curl -s -o /dev/null --max-time 2 http://127.0.0.1/; then
+    echo "joomla-stop: Apache is still running. The end of /var/log/apache2/error.log:" >&2
+    tail -n 20 /var/log/apache2/error.log >&2 || true
+    status=1
+fi
+if mariadb-admin ping > /dev/null 2>&1; then
+    said=$(mariadb-admin --shutdown-timeout=60 shutdown 2>&1) || true
+    if mariadb-admin ping > /dev/null 2>&1; then
+        echo "joomla-stop: MariaDB is still running. mariadb-admin shutdown said: ${said:-nothing}" >&2
+        echo "The end of /var/log/mysql/error.log:" >&2
+        tail -n 20 /var/log/mysql/error.log >&2 || true
+        status=1
+    fi
+fi
+exit "$status"
 SH
 COPY --chmod=0755 <<'SH' /usr/local/bin/as-www-data
 #!/bin/sh
@@ -395,9 +415,14 @@ curl -fsS http://127.0.0.1/LICENSE.txt | cmp - /src/LICENSE.txt
 joomla-console cache:clean
 suite() {
     # Run a PHPUnit suite, keep its log and state its exit code. Failing tests do not fail the build; a PHPUnit that
-    # cannot run at all (126, 127) does, since the image would lack what threat_model.md promises.
-    local code=0
-    joomla-phpunit --testsuite "$1" 2>&1 | tee "/var/log/phpunit-$1.log" || code=${PIPESTATUS[0]}
+    # cannot run at all (126, 127) does, since the image would lack what threat_model.md promises. A log that cannot be
+    # saved is reported on its own line and leaves the suite's exit code as PHPUnit returned it.
+    local status=(0 0)
+    joomla-phpunit --testsuite "$1" 2>&1 | tee "/var/log/phpunit-$1.log" || status=("${PIPESTATUS[@]}")
+    local code=${status[0]}
+    if [ "${status[1]}" -ne 0 ]; then
+        echo "WARNING: PHPUnit $1 suite: its log /var/log/phpunit-$1.log could not be saved (tee exit code ${status[1]})"
+    fi
     echo "$1 $code" >> /var/log/phpunit-results.txt
     case $code in
         0) echo "PHPUnit $1 suite: passed (exit code 0)" ;;
