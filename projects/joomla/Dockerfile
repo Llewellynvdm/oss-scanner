@@ -10,8 +10,8 @@
 # http://127.0.0.1/administrator/ and the web services API at http://127.0.0.1/api/index.php/v1/. `joomla-stop` stops
 # them. threat_model.md lists the accounts, the API tokens and the other helpers.
 #
-# The PHP and Apache base is the one Joomla's official 6.2 image is built on. Node and Composer come from their
-# official images, at the versions the CMS's lock files expect.
+# The PHP and Apache base is the one Joomla's official 6.2 image is built on. Node 24 and Composer 2 come from their
+# official images; the CMS needs Node 20 or later and npm 10.1 or later (package.json engines).
 FROM node:24-trixie-slim AS node
 FROM composer:2 AS composer
 FROM php:8.4-apache-trixie
@@ -96,27 +96,29 @@ set -e
 # Files root creates in these directories (for example by running cli/joomla.php as root) would stop the site, which
 # runs as www-data, from writing there. Hand them back first.
 chown -R www-data:www-data /src/administrator/cache /src/administrator/logs /src/cache /src/tmp /src/images /var/mail/joomla
-mkdir -p /run/mysqld
+mkdir -p /run/mysqld /var/log/mysql
 chown mysql:mysql /run/mysqld
+chown mysql:adm /var/log/mysql
 if ! mariadb-admin ping --silent 2>/dev/null; then
-    # The server's errors go to /var/log/mysql/error.log (not syslog, which the container does not have).
+    # The container has no syslog: the server logs to /var/log/mysql/error.log, its wrapper to start.log.
     "$(command -v mariadbd-safe || command -v mysqld_safe)" --skip-syslog --log-error=/var/log/mysql/error.log \
         >> /var/log/mysql/start.log 2>&1 &
     server=$!
-    for _ in $(seq 1 60); do
-        mariadb-admin ping --silent 2>/dev/null && break
+    waited=0
+    until mariadb-admin ping --silent 2>/dev/null; do
         if ! kill -0 "$server" 2>/dev/null; then
-            echo "MariaDB exited before it was ready. /var/log/mysql/error.log ends with:" >&2
-            tail -n 20 /var/log/mysql/error.log >&2
-            exit 1
+            problem="MariaDB exited before it was ready"
+        elif [ "$waited" -ge 120 ]; then
+            problem="MariaDB was not ready after 60 seconds"
+        else
+            sleep 0.5
+            waited=$((waited + 1))
+            continue
         fi
-        sleep 0.5
-    done
-    if ! mariadb-admin ping --silent 2>/dev/null; then
-        echo "MariaDB was not ready after 30 seconds. /var/log/mysql/error.log ends with:" >&2
-        tail -n 20 /var/log/mysql/error.log >&2
+        echo "$problem. The ends of its logs:" >&2
+        tail -n 20 /var/log/mysql/error.log /var/log/mysql/start.log >&2 || true
         exit 1
-    fi
+    done
 fi
 if ! { [ -s /var/run/apache2/apache2.pid ] && kill -0 "$(cat /var/run/apache2/apache2.pid)" 2>/dev/null; }; then
     apachectl start
@@ -301,12 +303,25 @@ for spec in administrator:Administrator manager:Manager publisher:Publisher edit
         --password="$login-password" --usergroup="$group"
 done
 joomla-console user:list
-# Point the Integration suite at this MariaDB and skip its LDAP tests, as tests/Integration/README.md describes.
-sed -e 's@JTEST_DB_HOST" value="mysql"@JTEST_DB_HOST" value="localhost"@' \
-    -e 's@JTEST_DB_NAME" value="test_joomla"@JTEST_DB_NAME" value="joomla_test"@' \
-    -e 's@JTEST_DB_USER" value="joomla_ut"@JTEST_DB_USER" value="joomla"@' \
-    -e 's@JTEST_DB_PASSWORD" value="joomla_ut"@JTEST_DB_PASSWORD" value="joomla"@' \
-    -e 's@JTEST_LDAP_HOST" value="openldap"@JTEST_LDAP_HOST" value=""@' phpunit.xml.dist > phpunit.xml
+# Point the Integration suite at this MariaDB and skip its LDAP tests, as tests/Integration/README.md describes. A
+# constant phpunit.xml.dist no longer has is reported, not fatal: like a failing test, it must not stop the scan.
+php <<'PHP'
+<?php
+$settings = ['JTEST_DB_ENGINE' => 'mysqli', 'JTEST_DB_HOST' => 'localhost', 'JTEST_DB_NAME' => 'joomla_test',
+             'JTEST_DB_USER' => 'joomla', 'JTEST_DB_PASSWORD' => 'joomla', 'JTEST_LDAP_HOST' => ''];
+$xml = new DOMDocument();
+$xml->load('/src/phpunit.xml.dist');
+$xpath = new DOMXPath($xml);
+foreach ($settings as $name => $value) {
+    $constants = $xpath->query("/phpunit/php/const[@name='$name']");
+    if ($constants->length === 1) {
+        $constants->item(0)->setAttribute('value', $value);
+    } else {
+        echo "WARNING: phpunit.xml.dist has no $name constant; the Integration suite may not reach MariaDB\n";
+    }
+}
+$xml->save('/src/phpunit.xml');
+PHP
 chown www-data:www-data phpunit.xml
 joomla-stop
 EOF
