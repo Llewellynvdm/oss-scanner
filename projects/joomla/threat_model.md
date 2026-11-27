@@ -126,12 +126,12 @@ Lower priority or out of scope:
 ## How to exercise it
 
 - Run `joomla-start` first. It starts MariaDB and Apache (the container has no init system) and is safe to run again.
-  `joomla-stop` stops both; if one does not stop, it says which and exits 1. The site is `http://127.0.0.1/`, the
-  administrator `http://127.0.0.1/administrator/`, the API `http://127.0.0.1/api/index.php/v1/`. Apache listens on
-  the loopback interface only. At the top level of the checkout it serves only what a Joomla release ships
-  (`build/build.php`); any other top-level file or directory gets 403, including one created after the build, such as
-  a `sitemap.xml` or a file an exploit writes. A finding that writes a file there is still a finding: confirm the
-  write on disk.
+  `joomla-stop` stops both; if one is still running a minute later, it says which and exits 1. The site is
+  `http://127.0.0.1/`, the administrator `http://127.0.0.1/administrator/`, the API
+  `http://127.0.0.1/api/index.php/v1/`. Apache listens on the loopback interface only. At the top level of the
+  checkout it serves only what a Joomla release ships (`build/build.php`); any other top-level file or directory gets
+  403, including one created after the build, such as a `sitemap.xml` or a file an exploit writes. A finding that
+  writes a file there is still a finding: confirm the write on disk.
 - The site is installed with the stock profile and no sample data. One account per core group exists; every password
   is `<login>-password`:
   - `superuser` (Super Users), `administrator` (Administrator), `manager` (Manager), `publisher` (Publisher),
@@ -165,7 +165,8 @@ Lower priority or out of scope:
   integration suite against `joomla_test` (its LDAP tests are skipped: there is no LDAP server). Both run offline. The
   Cypress System suite needs a browser and does not run here; reproduce through curl or PHP instead. The build ran
   both PHPUnit suites without failing on red tests: `/var/log/phpunit-results.txt` holds each suite's exit code and
-  `/var/log/phpunit-Unit.log` and `/var/log/phpunit-Integration.log` their output.
+  `/var/log/phpunit-Unit.log` and `/var/log/phpunit-Integration.log` their output. A log the build could not write in
+  full is incomplete, and the build printed a warning naming it.
 - Logs: PHP and Apache errors in `/var/log/apache2/error.log`, requests in `/var/log/apache2/access.log`, MariaDB's
   in `/var/log/mysql/error.log`, Joomla's own in `/src/administrator/logs/`. Debug mode and error display are off, as
   on a production site.

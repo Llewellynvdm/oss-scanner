@@ -160,34 +160,45 @@ fi
 SH
 COPY --chmod=0755 <<'SH' /usr/local/bin/joomla-stop
 #!/bin/sh
-# Stop Apache and MariaDB, waiting at most a minute for each. Exits 0 when both are stopped, including when neither was
-# running. A service still running at the end is named, with what its shutdown said and the end of its log, and the
-# exit code is 1; the other service is stopped regardless. Only a pid that is Apache's is signalled: a pid file can
-# outlive its process when the container is restarted, and the pid may then belong to an unrelated process.
+# Stop Apache and MariaDB, giving each at most a minute. Exits 0 when both are stopped, including when neither was
+# running. A service is stopped when no live process of it is left and it no longer answers: Apache on
+# http://127.0.0.1/, MariaDB on its socket. A service still running at the end is named, with what its shutdown said and
+# the end of its log, and the exit code is 1; the other service is stopped regardless. Only a pid that a pid file names
+# and that is a process of the service is signalled: a pid file can outlive its process when the container is
+# restarted, and the pid may then belong to an unrelated process.
 status=0
-apache() { [ "$(cat "/proc/$1/comm" 2>/dev/null)" = apache2 ] && ! grep -qs '^State:[[:space:]]*Z' "/proc/$1/status"; }
+alive() { [ "$(cat "/proc/$2/comm" 2>/dev/null)" = "$1" ] && ! grep -qs '^State:[[:space:]]*Z' "/proc/$2/status"; }
+any_alive() { for proc in /proc/[0-9]*; do alive "$1" "${proc#/proc/}" && return 0; done; return 1; }
+gone_by() { while any_alive "$1" && [ "$(date +%s)" -lt "$2" ]; do sleep 0.5; done; }
+
+deadline=$(($(date +%s) + 60))
 pid=$(cat /var/run/apache2/apache2.pid 2>/dev/null || true)
-if [ -n "$pid" ] && apache "$pid"; then
+if [ -n "$pid" ] && alive apache2 "$pid"; then
     apachectl stop
-    waited=0
-    while apache "$pid" && [ "$waited" -lt 120 ]; do
-        sleep 0.5
-        waited=$((waited + 1))
-    done
+    gone_by apache2 "$deadline"
 fi
-if { [ -n "$pid" ] && apache "$pid"; } || curl -s -o /dev/null --max-time 2 http://127.0.0.1/; then
+if any_alive apache2 || curl -s -o /dev/null --max-time 2 http://127.0.0.1/; then
     echo "joomla-stop: Apache is still running. The end of /var/log/apache2/error.log:" >&2
     tail -n 20 /var/log/apache2/error.log >&2 || true
     status=1
 fi
+
+deadline=$(($(date +%s) + 60))
+pid=$(cat /run/mysqld/mysqld.pid 2>/dev/null || true)
 if mariadb-admin ping > /dev/null 2>&1; then
     said=$(mariadb-admin --shutdown-timeout=60 shutdown 2>&1) || true
-    if mariadb-admin ping > /dev/null 2>&1; then
-        echo "joomla-stop: MariaDB is still running. mariadb-admin shutdown said: ${said:-nothing}" >&2
-        echo "The end of /var/log/mysql/error.log:" >&2
-        tail -n 20 /var/log/mysql/error.log >&2 || true
-        status=1
-    fi
+    said="mariadb-admin shutdown said: ${said:-nothing}"
+elif [ -n "$pid" ] && alive mariadbd "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    said="Its socket did not answer, so its process ($pid) was sent SIGTERM."
+else
+    said="Its socket did not answer, and /run/mysqld/mysqld.pid names no live mariadbd to signal."
+fi
+gone_by mariadbd "$deadline"
+if any_alive mariadbd || mariadb-admin ping > /dev/null 2>&1; then
+    echo "joomla-stop: MariaDB is still running. $said The end of /var/log/mysql/error.log:" >&2
+    tail -n 20 /var/log/mysql/error.log >&2 || true
+    status=1
 fi
 exit "$status"
 SH
@@ -409,6 +420,16 @@ test "$(status http://127.0.0.1/libraries/vendor/composer/installed.json)" = 403
 test "$(status http://127.0.0.1/phpunit.xml)" = 403
 test "$(status http://127.0.0.1/build/build.mjs)" = 403
 test "$(status http://127.0.0.1/.git/HEAD)" = 403
+# Files a site owner adds at the top level: a robots.txt made from robots.txt.dist is served, as on a release; any other,
+# such as a sitemap.xml, is not (see the Apache comment above). Both are removed before the result is checked.
+install -o www-data -g www-data -m 0644 robots.txt.dist robots.txt
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"/>' > sitemap.xml
+robots=$(status http://127.0.0.1/robots.txt)
+sitemap=$(status http://127.0.0.1/sitemap.xml)
+rm -f robots.txt sitemap.xml
+echo "Apache, files a site owner adds: /robots.txt $robots (expected 200), /sitemap.xml $sitemap (expected 403)"
+test "$robots" = 200
+test "$sitemap" = 403
 test "$(status http://127.0.0.1/configuration.php)" = 200                                 # configuration.php is executed,
 test -z "$(curl -s http://127.0.0.1/configuration.php)"                                    # not served
 curl -fsS http://127.0.0.1/LICENSE.txt | cmp - /src/LICENSE.txt

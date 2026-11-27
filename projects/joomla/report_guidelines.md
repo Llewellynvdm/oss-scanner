@@ -8,11 +8,12 @@ Use a short title that names the affected CMS component, plugin or library and d
 - **Tested environment.** Give the Joomla CMS version and commit. Identify the application (Site, Administrator, API or
   Console) and any PHP or database details that affected the result. State which versions were tested and label any
   suspected version range as an inference.
-- **Evidence.** Describe the steps from the image's installed site: the account used (the image's accounts and API
-  tokens are listed in `threat_model.md`), any setting, permission or content created first, the request made, the
-  observed and the expected outcome. Name the image's API grants (`threat_model.md` lists them) when the finding depends on
-  them. Identify the affected source file and method. A curl command or a PHPUnit test is
-  the preferred reproducer.
+- **Evidence.** Describe the steps from the image's installed site: the account or group used (`threat_model.md` lists
+  the image's accounts and how to get an API token), any setting, permission or content that differs from the stock
+  site, the request made, the observed and the expected outcome. Name the image's API grants (`threat_model.md` lists
+  them) when the finding depends on them. Leave passwords, API tokens and session cookies out of the report: in a curl
+  command, write `$(joomla-api-token <login>)` instead of a token. Identify the affected source file and method. A curl
+  command or a PHPUnit test is the preferred reproducer.
 - **Source and proposed fix.** If the finding was previously reported, cite its source. If a patch is available,
   explain what it corrects and give the results of the tests run against it.
 
