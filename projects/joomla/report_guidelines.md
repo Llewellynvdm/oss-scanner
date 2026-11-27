@@ -10,8 +10,8 @@ Use a short title that names the affected CMS component, plugin or library and d
   suspected version range as an inference.
 - **Evidence.** Describe the steps from the image's installed site: the account used (the image's accounts and API
   tokens are listed in `threat_model.md`), any setting, permission or content created first, the request made, the
-  observed and the expected outcome. Name the image's two non-stock settings (API login and API tokens for every group)
-  when the finding depends on them. Identify the affected source file and method. A curl command or a PHPUnit test is
+  observed and the expected outcome. Name the image's API grants (`threat_model.md` lists them) when the finding depends on
+  them. Identify the affected source file and method. A curl command or a PHPUnit test is
   the preferred reproducer.
 - **Source and proposed fix.** If the finding was previously reported, cite its source. If a patch is available,
   explain what it corrects and give the results of the tests run against it.

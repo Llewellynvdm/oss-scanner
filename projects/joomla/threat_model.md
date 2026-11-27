@@ -113,12 +113,22 @@ Lower priority or out of scope:
   is `<login>-password`:
   - `superuser` (Super Users), `administrator` (Administrator), `manager` (Manager), `publisher` (Publisher),
     `editor` (Editor), `author` (Author), `registered` (Registered); anonymous is the Guest group.
-  - Two settings differ from a stock site so that each account can use the API with its group's permissions:
-    Registered and Manager (and the groups under them) have `core.login.api` and `core.api`, which a stock site grants
-    Super Users alone, and every group may hold an API token. Name this prerequisite when a finding depends on it.
+- The API differs from a stock site, where Super Users alone may log in to it, hold a token and use its web services
+  (`core.api`). Here every account may log in and holds a token, and web service access mirrors the administrator:
+  Administrator has `core.api` on every component, as `core.manage` gives it every component there; Manager on
+  banners, contacts, content, media and newsfeeds, the components Managers manage; Registered, Author, Editor and
+  Publisher on content and media, where their site content rights apply. The users web service stays with
+  Administrator and Super Users, as the Users manager does. A group reading a component through a web service it
+  holds `core.api` on is not a finding; a finding is an action its other permissions on that component or item do not
+  allow (create, edit, publish, delete, edit others' items), or data the administrator would not show the same user.
+  Name these grants when a finding depends on them.
 - `joomla-api-token <login>` prints a user's API token, creating one if they have none. For example:
   `curl -H "Authorization: Bearer $(joomla-api-token editor)" http://127.0.0.1/api/index.php/v1/content/articles`.
   Basic authentication for the API is disabled, as on a stock site.
+- `joomla-permission <asset> <action> <group id>=<1|0|->` changes a group's permission on an asset (`root.1`, a
+  component such as `com_users`, or an item such as `com_content.article.1`), as the Permissions tabs do; Joomla has
+  no console command for it. Group ids: Public 1, Registered 2, Author 3, Editor 4, Publisher 5, Manager 6,
+  Administrator 7, Super Users 8, Guest 9.
 - Emails are not sent; each one lands in `/var/mail/joomla/` as an `.eml` file, so password reset links,
   activation links and multi-factor codes can be read.
 - The database is `joomla` on MariaDB, user `joomla` / `joomla`, table prefix `jos_`, over the unix socket;

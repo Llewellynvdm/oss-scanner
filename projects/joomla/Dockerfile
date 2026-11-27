@@ -89,6 +89,7 @@ RUN mkdir -p /var/mail/joomla && chown www-data:www-data /var/mail/joomla \
 #   joomla-console    cli/joomla.php as www-data
 #   joomla-phpunit    PHPUnit as www-data, from /src, with the checkout's phpunit.xml
 #   joomla-api-token  prints a user's web services API token, giving them one if they have none
+#   joomla-permission sets a group's permission for an action on an asset (root.1, a component, an item)
 COPY --chmod=0755 <<'SH' /usr/local/bin/joomla-start
 #!/bin/sh
 set -e
@@ -171,6 +172,54 @@ if ((int) ($profile['joomlatoken.enabled'] ?? 0) !== 1) {
 }
 echo base64_encode('sha256:' . $id . ':' . hash_hmac('sha256', base64_decode($profile['joomlatoken.token']), $config->secret)), "\n";
 PHP
+COPY --chmod=0755 <<'PHP' /usr/local/bin/joomla-permission
+#!/usr/bin/env php
+<?php
+// Set a user group's permission for an action on an asset, as the Permissions tab of Global Configuration or of a
+// component's options does. Joomla has no console command for this. For example:
+//   joomla-permission root.1 core.login.api 2=1        # Registered (and the groups under it) may log in to the API
+//   joomla-permission com_users core.api 6=0           # Manager may not use the users web service
+//   joomla-permission com_content.article.1 core.edit 3=1
+// A value of 1 allows, 0 denies, and - removes the group's setting so that it inherits again.
+\define('_JEXEC', 1);
+require '/src/configuration.php';
+$config = new JConfig();
+[$asset, $action] = [$argv[1] ?? '', $argv[2] ?? ''];
+$settings = \array_slice($argv, 3);
+if ($asset === '' || $action === '' || !$settings || !preg_match('/^[a-z0-9._]+$/i', $action)) {
+    fwrite(STDERR, "usage: joomla-permission <asset name> <action> <group id>=<1|0|-> ...\n");
+    exit(2);
+}
+$db = new mysqli($config->host, $config->user, $config->password, $config->db);
+$db->set_charset('utf8mb4');
+$assets = $config->dbprefix . 'assets';
+$query = $db->prepare("SELECT rules FROM $assets WHERE name = ?");
+$query->bind_param('s', $asset);
+$query->execute();
+$json = $query->get_result()->fetch_column();
+if ($json === false || $json === null) {
+    fwrite(STDERR, "no asset named $asset\n");
+    exit(1);
+}
+$rules = json_decode($json, true) ?: [];
+foreach ($settings as $setting) {
+    if (!preg_match('/^(\d+)=([01-])$/', $setting, $match)) {
+        fwrite(STDERR, "bad setting $setting: expected <group id>=<1|0|->\n");
+        exit(2);
+    }
+    if ($match[2] === '-') {
+        unset($rules[$action][$match[1]]);
+    } else {
+        $rules[$action][$match[1]] = (int) $match[2];
+    }
+}
+$rules = array_filter($rules);
+$json  = json_encode($rules);
+$query = $db->prepare("UPDATE $assets SET rules = ? WHERE name = ?");
+$query->bind_param('ss', $json, $asset);
+$query->execute();
+echo "$asset: $json\n";
+PHP
 
 # scanner contract: the checkout lives inside the image, at /src. As on a production site, the web server owns the
 # Joomla directory, so the site can write its caches, logs and uploads and the files an extension installation
@@ -198,9 +247,13 @@ RUN as-www-data composer install --prefer-dist --no-interaction --no-progress \
 #   registered     Registered
 #   (anonymous)    Public: the Guest group, no login
 # Databases: `joomla` for the site (user joomla / joomla, table prefix jos_) and `joomla_test` for the Integration test
-# suite, whose phpunit.xml points at it. Two settings differ from a stock site so that every account can use the API
-# with the permissions of its group: Registered and Manager (and the groups under them) may log in to the API, which a
-# stock site allows Super Users alone, and every group may hold an API token (see joomla-api-token).
+# suite, whose phpunit.xml points at it.
+#
+# A stock site lets Super Users alone log in to the API, hold an API token and use the web services (`core.api`).
+# Here every account can use the API with its group's rights, and web service access mirrors the administrator:
+# Administrator gets `core.api` on everything, as `core.manage` gives it everything there; Manager on the components
+# Managers manage (banners, contacts, content, media, newsfeeds); the Registered tree on content and media, where its
+# site content rights apply. The users web service stays with Administrator and Super Users, as the Users manager does.
 RUN --network=none <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -216,14 +269,15 @@ as-www-data php installation/joomla.php install --no-interaction \
     --site-name='Joomla OSS Scanner' --admin-user='Super User' --admin-username=superuser \
     --admin-password=superuser-password --admin-email=superuser@example.org \
     --db-type=mysqli --db-host=localhost --db-user=joomla --db-pass=joomla --db-name=joomla --db-prefix=jos_
-mariadb joomla <<'SQL'
-UPDATE jos_assets SET rules = REPLACE(REPLACE(rules,
-    '"core.login.api":{"8":1}', '"core.login.api":{"8":1,"2":1,"6":1}'),
-    '"core.api":{"8":1}', '"core.api":{"8":1,"2":1,"6":1}') WHERE id = 1;
-UPDATE jos_extensions SET params = '{"allowedUserGroups":["2","3","4","5","6","7","8"]}'
-    WHERE type = 'plugin' AND folder = 'user' AND element = 'token';
-SQL
-mariadb -N joomla -e "SELECT rules FROM jos_assets WHERE id = 1" | grep '"core.login.api":{"8":1,"2":1,"6":1}' > /dev/null
+joomla-permission root.1 core.login.api 2=1 6=1
+joomla-permission root.1 core.api 7=1
+for component in com_banners com_contact com_content com_media com_newsfeeds; do
+    joomla-permission "$component" core.api 6=1
+done
+joomla-permission com_content core.api 2=1
+joomla-permission com_media core.api 2=1
+mariadb joomla -e "UPDATE jos_extensions SET params = '{\"allowedUserGroups\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\"]}'
+    WHERE type = 'plugin' AND folder = 'user' AND element = 'token'"
 for spec in administrator:Administrator manager:Manager publisher:Publisher editor:Editor author:Author registered:Registered; do
     IFS=: read -r login group <<< "$spec"
     joomla-console user:add --username="$login" --name="$group" --email="$login@example.org" \
@@ -252,8 +306,13 @@ status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 curl -fsSL http://127.0.0.1/ | grep 'Joomla OSS Scanner' > /dev/null                      # the installed site, not the installer
 curl -fsSL http://127.0.0.1/administrator/index.php | grep 'name="username"' > /dev/null   # the administrator login form
 [[ "$(status http://127.0.0.1/api/index.php/v1/content/articles)" =~ ^40[13]$ ]]          # the API refuses anonymous requests
+api() { curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(joomla-api-token "$1")" "http://127.0.0.1/api/index.php/v1/$2"; }
 curl -fsS -H "Authorization: Bearer $(joomla-api-token superuser)" http://127.0.0.1/api/index.php/v1/users | grep '"superuser"' > /dev/null
-curl -fsS -H "Authorization: Bearer $(joomla-api-token editor)" http://127.0.0.1/api/index.php/v1/content/articles | grep '"data"' > /dev/null
+test "$(api administrator users)" = 200          # Administrators manage users, through the API too
+test "$(api manager users)" = 403                 # Managers do not, as in the administrator
+test "$(api registered users)" = 403
+test "$(api author content/articles)" = 200       # the site content groups reach content
+test "$(api registered content/articles)" = 200
 test "$(status http://127.0.0.1/.git/HEAD)" = 403
 test "$(status http://127.0.0.1/configuration.php)" = 200 && test -z "$(curl -s http://127.0.0.1/configuration.php)"
 curl -fsS http://127.0.0.1/LICENSE.txt | cmp - /src/LICENSE.txt
